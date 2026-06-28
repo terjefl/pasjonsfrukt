@@ -95,7 +95,7 @@ users:
 
 When `users` is configured it takes precedence over `secret`. After adding or changing users, run `pasjonsfrukt sync` to regenerate all feed files.
 
-> **Migrating from `secret` to `users`:** The existing `feed.xml` files become orphaned. Run `pasjonsfrukt sync` to generate the new `feed-<alias>.xml` files, then remove the old `feed.xml` files manually.
+> **Migrating from `secret` to `users`:** The existing `<feed_name>.xml` files on disk become orphaned — the server now looks for `<feed_name>-<alias>.xml` instead. Run `pasjonsfrukt sync` to generate the new per-user feed files, then remove the old ones manually.
 
 #### `disable_index`
 
@@ -134,7 +134,11 @@ podcasts:
   another-podcast-slug:            # Minimal entry — all settings use defaults
 ```
 
-`feed_name` controls the filename: single-secret and no-auth setups produce `<feed_name>.xml`; multi-user setups produce `<feed_name>-<alias>.xml` per user.
+`feed_name` is the base filename of the RSS XML file stored on disk. **It has no effect on the URL** — the endpoint is always `GET /{slug}` regardless of this setting. The default (`"feed"`) is fine in most cases; only change it if you have a specific reason to name the file differently.
+
+File location on disk:
+- Single-secret / no-auth: `yield/{slug}/{feed_name}.xml`
+- Multi-user: `yield/{slug}/{feed_name}-{alias}.xml` per user
 
 ---
 
