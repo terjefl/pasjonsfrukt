@@ -1,86 +1,105 @@
 # 🍹 pasjonsfrukt
 
-[![PyPI](https://img.shields.io/pypi/v/pasjonsfrukt)](https://pypi.org/project/pasjonsfrukt/)
-![PyPI - Python Version](https://img.shields.io/pypi/pyversions/pasjonsfrukt)
-[![PyPI - License](https://img.shields.io/pypi/l/pasjonsfrukt)](https://github.com/mathiazom/pasjonsfrukt/blob/main/LICENSE)
-
 Scrape PodMe podcast streams to mp3 and host with RSS feed.
 
-<i style="color:grey">Note: A valid PodMe subscription is required to access premium content</i>
+> A valid PodMe subscription is required to access premium content.
 
-### Setup
+This is a personal fork of [mathiazom/pasjonsfrukt](https://github.com/mathiazom/pasjonsfrukt) with the following additions:
+- **Podcast index page** (`GET /`) — a mobile-friendly HTML overview of all configured podcasts, with RSS links and one-tap buttons for Overcast and Pocket Casts.
 
-1. Install `pasjonsfrukt`
+---
 
-```
-pip install pasjonsfrukt
-```
+### Docker Compose
 
-2. Install [`ffmpeg`](https://ffmpeg.org/)
+The recommended way to run pasjonsfrukt is with Docker Compose.
 
-3. Define harvest and feed configurations by copying [`config.template.yaml`](config.template.yaml) to your own `config.yaml`.  
-   Most importantly, you need to provide:
-
-   - a `host` path (for links in the RSS feeds)
-   - login credentials (`auth`) for your PodMe account
-   - the `podcasts` you wish to harvest and serve
-
-### Usage
-
-##### Harvest episodes
-
-Harvest episodes of all podcasts defined in config
-
-```sh
-pasjonsfrukt harvest
-```
-
-Harvest episodes of specific podcast(s)
-
-```sh
-pasjonsfrukt harvest [PODCAST_SLUG]...
-```
-
-##### Update feeds
-
-Update all RSS feeds defined in config
-
-```sh
-pasjonsfrukt sync
+**`compose.yml`**
+```yaml
+services:
+  pasjonsfrukt:
+    image: ghcr.io/terjefl/pasjonsfrukt:canary
+    container_name: pasjonsfrukt
+    restart: unless-stopped
+    ports:
+      - "8100:8000"
+    environment:
+      - TZ=Europe/Oslo
+    volumes:
+      - /path/to/config.yaml:/app/config.yaml:ro
+      - /path/to/crontab:/etc/cron.d/pasjonsfrukt-crontab:ro
+      - /path/to/podcast/files:/app/yield
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/openapi.json || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 ```
 
-Update RSS feed of specific podcast
+The crontab controls when harvesting runs. Example:
 
-```sh
-pasjonsfrukt sync [PODCAST_SLUG]...
+```cron
+0 4 * * * root pasjonsfrukt harvest >> /var/log/pasjonsfrukt.log 2>&1
 ```
 
-> The feeds are always updated after harvest, so manual feed syncing is only required if files are changed externally
+---
 
-##### Serve RSS feeds with episodes
+### Configuration
 
-Run web server
+Copy [`config.template.yaml`](config.template.yaml) to `config.yaml` and fill in your details.
 
-```sh
-pasjonsfrukt serve
+```yaml
+host: "https://your-domain-here"
+yield_dir: "yield"
+#secret: "optional-access-secret"
+
+#api:
+#  language: NO        # NO, SE, FI (default: NO)
+#  region: NO          # NO, SE, FI (default: NO)
+#  request_timeout: 30.0
+#  disable_credentials_storage: false
+
+auth:
+  email: "your@email.com"
+  password: "yourpassword"
+
+podcasts:
+  podcast-slug:
+    feed_name: "feed"
+    most_recent_episodes_limit: 50
+  another-podcast-slug:
 ```
 
-RSS feeds will be served at `<host>/<podcast_slug>`, while episode files are served
-at `<host>/<podcast_slug>/<episode_id>`
+**`host`** is used to build links in the RSS feeds and must be publicly reachable by your podcast app.
 
-> `host` must be defined in the config file.
+**`secret`** adds a `?secret=<value>` query parameter requirement on all endpoints — useful for keeping feeds semi-private when hosted publicly.
 
-##### Secret
+**`api`** lets you configure PodMe region and language (for SE/FI content), request timeout, and credential storage behaviour.
 
-If a `secret` has been defined in the config, a query parameter (`?secret=<secret-string>`) with matching secret string
-is required to access the served podcast feeds and episode files. This is useful for making RSS feeds accessible on the
-web, without making them fully public. Still, the confidentiality is provided as is, with no warranties 🙃
+---
+
+### Endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /` | HTML index of all configured podcasts |
+| `GET /{slug}` | RSS feed for a podcast |
+| `GET /{slug}/{episode_id}` | Episode audio file |
+
+If a `secret` is configured, append `?secret=<value>` to all requests.
+
+#### Podcast index page
+
+The index page (`GET /`) lists all configured podcasts as cards with title, description, and direct links to subscribe in Overcast or Pocket Casts. Useful as a private landing page for your feeds.
+
+---
 
 ### Development
 
 #### Formatting
 
-```commandline
+```sh
 poe fmt
 ```
-> uses [Black](https://black.readthedocs.io/en/stable/) code formatter
+
+> Uses [Black](https://black.readthedocs.io/en/stable/)
