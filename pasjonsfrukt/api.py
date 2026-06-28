@@ -66,7 +66,8 @@ def get_feed_meta(feed_path):
         title = title_el.text if title_el is not None else None
         description = desc_el.text if desc_el is not None else None
         return title, description
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] Could not read feed metadata from {feed_path}: {e}")
         return None, None
 
 
