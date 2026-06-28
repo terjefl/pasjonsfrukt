@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import re
 from pathlib import Path
@@ -85,9 +86,17 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
     def log_finished(url: str, path: str):
         print(f"[INFO] Finished downloading {url} to {path}.")
 
-    await client.download_files(
-        download_infos, on_progress=log_progress, on_finished=log_finished
-    )
+    async def download_one(url, path):
+        try:
+            await client.download_file(
+                url, path, on_progress=log_progress, on_finished=log_finished
+            )
+        except Exception as e:
+            print(f"[WARN] Skipping {path.name}: {e}")
+            if path.exists():
+                path.unlink()
+
+    await asyncio.gather(*[download_one(url, path) for url, path in download_infos])
 
     await sync_slug_feed(client, config, slug, harvested_ids=harvested_ids + to_harvest)
 
