@@ -20,6 +20,7 @@ COPY pasjonsfrukt pasjonsfrukt
 
 RUN /root/.local/bin/poetry install --only main
 
+COPY docker/episode_not_available.mp3 .
 COPY docker/entrypoint.sh .
 RUN chmod +x ./entrypoint.sh
 ENTRYPOINT ["./entrypoint.sh"]

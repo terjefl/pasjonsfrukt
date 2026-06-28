@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import re
+import shutil
 from pathlib import Path
 
 from podme_api import (
@@ -86,15 +87,20 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
     def log_finished(url: str, path: str):
         print(f"[INFO] Finished downloading {url} to {path}.")
 
+    placeholder = Path(__file__).parent.parent / "episode_not_available.mp3"
+
     async def download_one(url, path):
         try:
             await client.download_file(
                 url, path, on_progress=log_progress, on_finished=log_finished
             )
         except Exception as e:
-            print(f"[WARN] Skipping {path.name}: {e}")
+            print(f"[WARN] Download failed for {path.name}: {e}")
             if path.exists():
                 path.unlink()
+            if placeholder.exists():
+                shutil.copy2(placeholder, path)
+                print(f"[INFO] Placed unavailable-episode placeholder at {path.name}")
 
     await asyncio.gather(*[download_one(url, path) for url, path in download_infos])
 
