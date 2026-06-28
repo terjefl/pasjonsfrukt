@@ -6,6 +6,8 @@ Scrape PodMe podcast streams to mp3 and host with RSS feed.
 
 This is a personal fork of [mathiazom/pasjonsfrukt](https://github.com/mathiazom/pasjonsfrukt) with the following additions:
 - **Podcast index page** (`GET /`) — a mobile-friendly HTML overview of all configured podcasts, with RSS links and one-tap buttons for Overcast and Pocket Casts.
+- **Multi-user support** — define multiple users in config, each with their own secret. Each user gets private RSS feeds with their secret embedded in episode URLs.
+- **Disable index** — optional config flag to turn off the index page entirely.
 
 ---
 
@@ -51,14 +53,6 @@ Copy [`config.template.yaml`](config.template.yaml) to `config.yaml` and fill in
 ```yaml
 host: "https://your-domain-here"
 yield_dir: "yield"
-#secret: "optional-access-secret"
-
-#api:
-#  language: NO        # NO, SE, FI (default: NO)
-#  region: NO          # NO, SE, FI (default: NO)
-#  request_timeout: 30.0
-#  disable_credentials_storage: false
-#  max_concurrent_downloads: 3
 
 auth:
   email: "your@email.com"
@@ -71,11 +65,76 @@ podcasts:
   another-podcast-slug:
 ```
 
-**`host`** is used to build links in the RSS feeds and must be publicly reachable by your podcast app.
+#### `host`
 
-**`secret`** adds a `?secret=<value>` query parameter requirement on all endpoints — useful for keeping feeds semi-private when hosted publicly.
+The public base URL of your instance. Used to build links in RSS feeds and on the index page — must be reachable by your podcast app.
 
-**`api`** lets you configure PodMe region and language (for SE/FI content), request timeout, credential storage behaviour, and the maximum number of simultaneous episode downloads (`max_concurrent_downloads`, default: 3).
+#### `yield_dir`
+
+Directory where downloaded MP3 files and generated RSS feeds are stored. Defaults to `"yield"`.
+
+#### `secret`
+
+Adds a `?secret=<value>` query parameter requirement on all endpoints. Useful for keeping feeds semi-private when hosted publicly. All clients share the same secret.
+
+```yaml
+secret: "my-shared-secret"
+```
+
+#### `users`
+
+Per-user secrets for multi-user setups. Each user gets their own private RSS feeds — episode URLs in each feed contain that user's secret, so podcast apps can fetch audio without extra configuration. MP3 files are not duplicated; the secret is only a URL parameter.
+
+```yaml
+users:
+  - alias: "alice"
+    secret: "alice-secret"
+  - alias: "bob"
+    secret: "bob-secret"
+```
+
+When `users` is configured it takes precedence over `secret`. After adding or changing users, run `pasjonsfrukt sync` to regenerate all feed files.
+
+> **Migrating from `secret` to `users`:** The existing `feed.xml` files become orphaned. Run `pasjonsfrukt sync` to generate the new `feed-<alias>.xml` files, then remove the old `feed.xml` files manually.
+
+#### `disable_index`
+
+Set to `true` to disable the HTML index page. `GET /` will return 404.
+
+```yaml
+disable_index: true
+```
+
+Defaults to `false`.
+
+#### `api`
+
+PodMe API settings. All fields are optional.
+
+```yaml
+api:
+  language: NO                     # NO, SE, FI (default: NO)
+  region: NO                       # NO, SE, FI (default: NO)
+  request_timeout: 30.0            # HTTP timeout in seconds (default: 30.0)
+  disable_credentials_storage: false  # Don't cache auth tokens to disk (default: false)
+  max_concurrent_downloads: 3      # Max simultaneous episode downloads (default: 3)
+```
+
+`max_concurrent_downloads` limits how many episodes are downloaded in parallel during a harvest. Reduce it if you hit rate limits or want to lower network load.
+
+#### `podcasts`
+
+A map of podcast slugs to per-podcast settings. The slug is the identifier used in the PodMe URL.
+
+```yaml
+podcasts:
+  podcast-slug:
+    feed_name: "feed"              # Base name for the RSS XML file (default: "feed")
+    most_recent_episodes_limit: 50 # Only harvest the N most recent episodes (default: no limit)
+  another-podcast-slug:            # Minimal entry — all settings use defaults
+```
+
+`feed_name` controls the filename: single-secret and no-auth setups produce `<feed_name>.xml`; multi-user setups produce `<feed_name>-<alias>.xml` per user.
 
 ---
 
@@ -87,11 +146,13 @@ podcasts:
 | `GET /{slug}` | RSS feed for a podcast |
 | `GET /{slug}/{episode_id}` | Episode audio file |
 
-If a `secret` is configured, append `?secret=<value>` to all requests.
+**With `secret`:** append `?secret=<value>` to all requests.
+
+**With `users`:** append `?secret=<user-secret>` to all requests. The RSS feed at `GET /{slug}` will contain episode URLs pre-populated with that user's secret, so podcast apps fetch audio correctly without further configuration.
 
 #### Podcast index page
 
-The index page (`GET /`) lists all configured podcasts as cards with title, description, and direct links to subscribe in Overcast or Pocket Casts. Useful as a private landing page for your feeds.
+The index page (`GET /`) lists all configured podcasts as cards with title, description, and direct links to subscribe in Overcast or Pocket Casts. Feed URLs on the page include the requesting user's secret automatically. Can be disabled with `disable_index: true`.
 
 ---
 

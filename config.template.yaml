@@ -1,20 +1,40 @@
 ---
-host: "https://<your-domain-here>"
-yield_dir: "yield"
+host: "https://<your-domain-here>"  # Public URL — used to build links in RSS feeds and index
+yield_dir: "yield"                  # Directory for downloaded MP3s and generated RSS feeds
+
+# Access control (choose one, or omit for no auth)
+#
+# Option 1 — single shared secret: all users use ?secret=<value> on all requests
 #secret: "<optional-access-secret>"
+#
+# Option 2 — per-user secrets: each user gets their own secret and private RSS feeds.
+# When users are configured, `secret` above is ignored for auth.
+#users:
+#  - alias: "alice"
+#    secret: "<alice-secret>"
+#  - alias: "bob"
+#    secret: "<bob-secret>"
+
+# Set to true to disable the HTML index page (GET /)
+#disable_index: false
+
+# PodMe API settings
 #api:
-#  language: NO        # NO, SE, FI (default: NO)
-#  region: NO          # NO, SE, FI (default: NO)
-#  request_timeout: 30.0
-#  disable_credentials_storage: false
-#  max_concurrent_downloads: 3
+#  language: NO                    # NO, SE, FI (default: NO)
+#  region: NO                      # NO, SE, FI (default: NO)
+#  request_timeout: 30.0           # HTTP timeout in seconds (default: 30.0)
+#  disable_credentials_storage: false  # Don't cache auth tokens to disk (default: false)
+#  max_concurrent_downloads: 3     # Max simultaneous episode downloads (default: 3)
+
 auth:
   email: "<your-email-here>"
   password: "<your-password-here>"
+
 podcasts:
-#  papaya:
-#    feed_name: "papayayaya"
+  # Each key is the podcast slug as it appears in the PodMe URL
+  # feed_name: base filename for the RSS XML (default: "feed" → feed.xml / feed-<alias>.xml)
+  # most_recent_episodes_limit: only harvest the N most recent episodes (default: no limit)
+#  min-serie:
+#    feed_name: "feed"
 #    most_recent_episodes_limit: 50
-#  gi-meg-alle-detaljene:
-#  konspirasjonspodden:
-...
+#  annen-podcast:

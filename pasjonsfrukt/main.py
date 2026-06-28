@@ -3,6 +3,7 @@ import contextlib
 import re
 import shutil
 from pathlib import Path
+from typing import Optional
 
 from podme_api import (
     PodMeDefaultAuthClient,
@@ -15,7 +16,7 @@ from podme_api.const import PodMeRegion
 from podme_api.models import PodMeLanguage
 from rfeed import Item, Guid, Enclosure, Feed, Image, iTunesItem, iTunes
 
-from .config import ApiConfig, Config
+from .config import ApiConfig, Config, User
 
 
 @contextlib.asynccontextmanager
@@ -172,8 +173,10 @@ def build_podcast_dir(config: Config, slug: str):
     return Path(config.yield_dir) / slug
 
 
-def build_podcast_feed_path(config: Config, slug: str):
-    return build_podcast_dir(config, slug) / f"{config.podcasts[slug].feed_name}.xml"
+def build_podcast_feed_path(config: Config, slug: str, alias: Optional[str] = None):
+    base = config.podcasts[slug].feed_name
+    filename = f"{base}-{alias}.xml" if alias else f"{base}.xml"
+    return build_podcast_dir(config, slug) / filename
 
 
 def build_podcast_episode_file_path(config: Config, podcast_slug: str, episode_id: int):
@@ -188,8 +191,9 @@ def build_feed(
     description: str,
     image_url: str,
     unavailable_ids: set[int] = None,
+    secret: Optional[str] = None,
 ):
-    secret_query_param = get_secret_query_parameter(config)
+    secret_query_param = f"?secret={secret}" if secret is not None else get_secret_query_parameter(config)
     unavailable_ids = unavailable_ids or set()
     items = []
     for e in episodes:
@@ -255,18 +259,37 @@ async def sync_slug_feed(
     unavailable_ids = {
         int(f.stem) for f in podcast_dir.glob("*.unavailable") if f.stem.isdigit()
     }
-    feed = build_feed(
-        config,
-        episodes,
-        slug,
-        podcast_info.title,
-        podcast_info.description,
-        podcast_info.image_url,
-        unavailable_ids=unavailable_ids,
-    )
     build_podcast_dir(config, slug).mkdir(parents=True, exist_ok=True)
-    with build_podcast_feed_path(config, slug).open("w", encoding="utf-8") as feed_file:
-        feed_file.write(feed)
-    print(
-        f"[INFO] '{slug}' feed now serving {len(episodes)} episode{'s' if len(episodes) != 1 else ''}"
-    )
+    if config.users:
+        for user in config.users:
+            feed = build_feed(
+                config,
+                episodes,
+                slug,
+                podcast_info.title,
+                podcast_info.description,
+                podcast_info.image_url,
+                unavailable_ids=unavailable_ids,
+                secret=user.secret,
+            )
+            with build_podcast_feed_path(config, slug, alias=user.alias).open("w", encoding="utf-8") as feed_file:
+                feed_file.write(feed)
+        print(
+            f"[INFO] '{slug}' feed written for {len(config.users)} user{'s' if len(config.users) != 1 else ''}"
+            f" ({len(episodes)} episode{'s' if len(episodes) != 1 else ''})"
+        )
+    else:
+        feed = build_feed(
+            config,
+            episodes,
+            slug,
+            podcast_info.title,
+            podcast_info.description,
+            podcast_info.image_url,
+            unavailable_ids=unavailable_ids,
+        )
+        with build_podcast_feed_path(config, slug).open("w", encoding="utf-8") as feed_file:
+            feed_file.write(feed)
+        print(
+            f"[INFO] '{slug}' feed now serving {len(episodes)} episode{'s' if len(episodes) != 1 else ''}"
+        )

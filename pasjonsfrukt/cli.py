@@ -106,8 +106,13 @@ def serve_api(
     ctx.args.insert(0, f"{api.__name__}:api")
     config = config_from_stream(config_stream)
     api_app.dependency_overrides[api_config] = lambda: config
+    secrets_to_redact = []
     if config.secret is not None:
-        secret_filter = LogRedactSecretFilter([config.secret])
+        secrets_to_redact.append(config.secret)
+    if config.users:
+        secrets_to_redact.extend(u.secret for u in config.users)
+    if secrets_to_redact:
+        secret_filter = LogRedactSecretFilter(secrets_to_redact)
         logging.getLogger("uvicorn.access").addFilter(secret_filter)
         logging.getLogger("uvicorn.error").addFilter(secret_filter)
     uvicorn.main.main(args=ctx.args)

@@ -8,7 +8,7 @@ from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import FileResponse, HTMLResponse
 
-from .config import Config
+from .config import Config, User
 from .main import (
     build_podcast_feed_path,
     build_podcast_episode_file_path,
@@ -30,17 +30,22 @@ def api_config() -> Optional[Config]:
     return None
 
 
-def raise_for_secret(config: Config, secret):
-    if config.secret is not None and not hmac.compare_digest(
-        secret or "", config.secret
-    ):
-        if secret is None:
-            raise HTTPException(
-                status_code=401, detail="Authorization failed, missing secret"
-            )
+def raise_for_secret(config: Config, secret: Optional[str]) -> Optional[User]:
+    if config.users:
+        for user in config.users:
+            if hmac.compare_digest(secret or "", user.secret):
+                return user
         raise HTTPException(
-            status_code=401, detail="Authorization failed, incorrect secret"
+            status_code=401,
+            detail="Authorization failed, missing secret" if secret is None else "Authorization failed, incorrect secret",
         )
+    elif config.secret is not None:
+        if not hmac.compare_digest(secret or "", config.secret):
+            raise HTTPException(
+                status_code=401,
+                detail="Authorization failed, missing secret" if secret is None else "Authorization failed, incorrect secret",
+            )
+    return None
 
 
 def raise_for_podcast_slug(config: Config, slug):
@@ -89,13 +94,16 @@ def render_description(desc, slug):
 
 @api.get("/", response_class=HTMLResponse)
 async def get_index(secret: Optional[str] = None, config: Config = Depends(api_config)):
-    raise_for_secret(config, secret)
+    if config.disable_index:
+        raise HTTPException(status_code=404, detail="Not found")
+    user = raise_for_secret(config, secret)
 
-    secret_param = get_secret_query_parameter(config)
+    alias = user.alias if user else None
+    secret_param = f"?secret={user.secret}" if user else get_secret_query_parameter(config)
 
     podcasts = []
     for slug in config.podcasts:
-        feed_path = build_podcast_feed_path(config, slug)
+        feed_path = build_podcast_feed_path(config, slug, alias=alias)
         title, description = get_feed_meta(feed_path)
         podcasts.append((title or slug, slug, description or ""))
 
@@ -169,9 +177,10 @@ function toggleDesc(uid) {{
 async def get_feed(
     slug: str, secret: Optional[str] = None, config: Config = Depends(api_config)
 ):
-    raise_for_secret(config, secret)
+    user = raise_for_secret(config, secret)
     raise_for_podcast_slug(config, slug)
-    return file_response_if_exists(build_podcast_feed_path(config, slug), RSSResponse)
+    alias = user.alias if user else None
+    return file_response_if_exists(build_podcast_feed_path(config, slug, alias=alias), RSSResponse)
 
 
 @api.get(f"/{{podcast_slug}}/{{episode_id}}")

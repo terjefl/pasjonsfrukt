@@ -27,6 +27,12 @@ class ApiConfig:
 
 
 @dataclass
+class User:
+    alias: str
+    secret: str
+
+
+@dataclass
 class Config(YAMLWizard):
     host: str
     auth: Auth
@@ -35,6 +41,8 @@ class Config(YAMLWizard):
     ]  # Podcast is not actually optional, see __post_init__
     yield_dir: str = "yield"
     secret: Optional[str] = None
+    disable_index: bool = False
+    users: list[User] = field(default_factory=list)
     api: ApiConfig = field(default_factory=ApiConfig)
 
     def __post_init__(self):
