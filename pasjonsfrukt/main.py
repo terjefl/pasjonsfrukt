@@ -85,7 +85,7 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
         download_infos, on_progress=log_progress, on_finished=log_finished
     )
 
-    await sync_slug_feed(client, config, slug)
+    await sync_slug_feed(client, config, slug, harvested_ids=harvested_ids + to_harvest)
 
 
 async def harvested_episode_ids(client: PodMeClient, config: Config, slug: str):
@@ -98,7 +98,7 @@ async def harvested_episode_ids(client: PodMeClient, config: Config, slug: str):
     for f in podcast_dir.iterdir():
         if not f.is_file():
             continue
-        m = re.match(r"(.*)\.mp3$", f.name)
+        m = re.match(r"^(\d+)\.mp3$", f.name)  # fix #1: only match numeric filenames
         if m is not None:
             episode_id = int(m.group(1))
             if episode_id in episode_ids:
@@ -149,9 +149,7 @@ def build_podcast_dir(config: Config, slug: str):
 
 
 def build_podcast_feed_path(config: Config, slug: str):
-    return (
-        build_podcast_dir(config, slug) / f"{config.podcasts.get(slug).feed_name}.xml"
-    )
+    return build_podcast_dir(config, slug) / f"{config.podcasts[slug].feed_name}.xml"
 
 
 def build_podcast_episode_file_path(config: Config, podcast_slug: str, episode_id: int):
@@ -205,12 +203,21 @@ def build_feed(
     return feed.rss()
 
 
-async def sync_slug_feed(client: PodMeClient, config: Config, slug: str):
+async def sync_slug_feed(
+    client: PodMeClient,
+    config: Config,
+    slug: str,
+    harvested_ids: list[int] = None,
+):
     if slug not in config.podcasts:
         print(f"[FAIL] The slug '{slug}' did not match any podcasts in the config file")
         return
     print(f"[INFO] Syncing '{slug}' feed...")
-    episode_ids = await harvested_episode_ids(client, config, slug)
+    episode_ids = (
+        harvested_ids
+        if harvested_ids is not None
+        else await harvested_episode_ids(client, config, slug)
+    )
     episodes = await client.get_episodes_info(episode_ids)
     podcast_info = await client.get_podcast_info(slug)
     feed = build_feed(

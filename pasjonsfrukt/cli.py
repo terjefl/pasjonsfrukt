@@ -107,9 +107,9 @@ def serve_api(
     config = config_from_stream(config_stream)
     api_app.dependency_overrides[api_config] = lambda: config
     if config.secret is not None:
-        logging.getLogger("uvicorn.access").addFilter(
-            LogRedactSecretFilter([config.secret])
-        )
+        secret_filter = LogRedactSecretFilter([config.secret])
+        logging.getLogger("uvicorn.access").addFilter(secret_filter)
+        logging.getLogger("uvicorn.error").addFilter(secret_filter)
     uvicorn.main.main(args=ctx.args)
 
 

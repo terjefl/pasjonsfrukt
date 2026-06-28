@@ -44,5 +44,5 @@ class Config(YAMLWizard):
         }
 
 
-def config_from_stream(stream: TextIOWrapper) -> Optional[Config]:
+def config_from_stream(stream: TextIOWrapper) -> Config:
     return Config.from_yaml(stream)

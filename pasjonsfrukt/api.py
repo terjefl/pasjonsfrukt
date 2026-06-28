@@ -1,3 +1,4 @@
+import hmac
 import html
 import xml.etree.ElementTree as ET
 from functools import lru_cache
@@ -30,7 +31,9 @@ def api_config() -> Optional[Config]:
 
 
 def raise_for_secret(config: Config, secret):
-    if config.secret is not None and secret != config.secret:
+    if config.secret is not None and not hmac.compare_digest(
+        secret or "", config.secret
+    ):
         if secret is None:
             raise HTTPException(
                 status_code=401, detail="Authorization failed, missing secret"
@@ -45,10 +48,10 @@ def raise_for_podcast_slug(config: Config, slug):
         raise HTTPException(status_code=404, detail="Requested resource not found")
 
 
-def file_response_if_exists(file_path):
+def file_response_if_exists(file_path, response_class=FileResponse):
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Requested resource not found")
-    return FileResponse(str(file_path.resolve()))
+    return response_class(str(file_path.resolve()))
 
 
 def get_feed_meta(feed_path):
@@ -167,7 +170,7 @@ async def get_feed(
 ):
     raise_for_secret(config, secret)
     raise_for_podcast_slug(config, slug)
-    return file_response_if_exists(build_podcast_feed_path(config, slug))
+    return file_response_if_exists(build_podcast_feed_path(config, slug), RSSResponse)
 
 
 @api.get(f"/{{podcast_slug}}/{{episode_id}}")
