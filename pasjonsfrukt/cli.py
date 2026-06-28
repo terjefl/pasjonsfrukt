@@ -9,7 +9,12 @@ from .api import api as api_app, api_config
 from .async_cli import AsyncTyper
 from .config import config_from_stream
 from .logging_utils import LogRedactSecretFilter
-from .main import get_podme_client, sync_slug_feed, harvest_podcast
+from .main import (
+    get_podme_client,
+    sync_slug_feed,
+    harvest_podcast,
+    check_slug_compatibility,
+)
 
 cli = AsyncTyper()
 
@@ -124,6 +129,37 @@ def print_config(
     Print parsed config
     """
     pprint.pprint(config_from_stream(config_stream))
+
+
+@cli.command(name="check")
+async def check_slug(
+    podcast_slug: Annotated[str, typer.Argument(metavar="PODCAST_SLUG")],
+    episodes: Annotated[
+        int,
+        typer.Option(
+            "--episodes",
+            "-n",
+            help="Number of recent episodes to check",
+        ),
+    ] = 20,
+    config_stream: Annotated[
+        Optional[typer.FileText],
+        typer.Option(
+            "--config-file",
+            "-c",
+            encoding="utf-8",
+            help="Configurations file",
+        ),
+    ] = "config.yaml",
+):
+    """
+    Check if a podcast slug is safe to add (all episodes on PodMe CDN, not Acast)
+    """
+    config = config_from_stream(config_stream)
+    async with get_podme_client(
+        config.auth.email, config.auth.password, config.api
+    ) as client:
+        await check_slug_compatibility(client, podcast_slug, episodes)
 
 
 @cli.callback()

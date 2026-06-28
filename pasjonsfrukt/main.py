@@ -106,6 +106,38 @@ async def harvested_episode_ids(client: PodMeClient, config: Config, slug: str):
     return harvested
 
 
+PODME_CDN_HOSTS = ("dd-podme.akamaized.net", "amd-podme.akamaized.net")
+ACAST_CDN_HOST = "flex2.acast.com"
+
+
+async def check_slug_compatibility(client: PodMeClient, slug: str, episode_count: int):
+    episodes = await client.get_latest_episodes(slug, episode_count)
+    if not episodes:
+        print(f"[WARN] No episodes found for '{slug}'")
+        return
+    episode_ids = [e.id for e in episodes]
+    download_urls = await client.get_episode_download_url_bulk(episode_ids)
+    podme_count = 0
+    acast_count = 0
+    for episode_id, url in download_urls:
+        if any(host in url for host in PODME_CDN_HOSTS):
+            print(f"  ✅ {episode_id}: PODME  ({url[:60]}...)")
+            podme_count += 1
+        elif ACAST_CDN_HOST in url:
+            print(f"  ❌ {episode_id}: ACAST  ({url[:60]}...)")
+            acast_count += 1
+        else:
+            print(f"  ❓ {episode_id}: UNKNOWN ({url[:60]}...)")
+    total = podme_count + acast_count
+    print(f"\nResultat for '{slug}': {podme_count}/{total} på PodMe-CDN")
+    if acast_count == 0:
+        print(f"✅ Trygg å legge til – alle episoder er på PodMe-CDN")
+    else:
+        print(
+            f"❌ Ikke trygg – {acast_count} episode{'r' if acast_count > 1 else ''} er på Acast-CDN og vil feile med 403"
+        )
+
+
 def get_secret_query_parameter(config: Config):
     if config.secret is None:
         return ""  # no secret required, so don't append query parameter
