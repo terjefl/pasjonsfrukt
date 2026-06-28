@@ -1,8 +1,6 @@
 services:
   pasjonsfrukt:
-    build:
-      context: ..
-      dockerfile: ./docker/Dockerfile
+    image: ghcr.io/terjefl/pasjonsfrukt:canary
     container_name: pasjonsfrukt-dev
     restart: unless-stopped
     #command: --host 0.0.0.0 --port 8000  # customize flags for 'api' startup command
