@@ -8,7 +8,11 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import FileResponse, HTMLResponse
 
 from .config import Config
-from .main import build_podcast_feed_path, build_podcast_episode_file_path, get_secret_query_parameter
+from .main import (
+    build_podcast_feed_path,
+    build_podcast_episode_file_path,
+    get_secret_query_parameter,
+)
 
 api = FastAPI()
 
@@ -99,7 +103,8 @@ async def get_index(secret: Optional[str] = None, config: Config = Depends(api_c
         feed_url_encoded = quote(feed_url, safe="")
         feed_url_no_proto = feed_url.removeprefix("https://").removeprefix("http://")
         desc_html = render_description(description, slug)
-        cards.append(f"""
+        cards.append(
+            f"""
         <div class="card">
             <div class="card-title">{html.escape(title)}</div>
             <div class="card-slug">{html.escape(slug)}</div>
@@ -109,7 +114,8 @@ async def get_index(secret: Optional[str] = None, config: Config = Depends(api_c
                 <a class="btn btn-overcast" href="overcast://x-callback-url/add?url={feed_url_encoded}">Overcast</a>
                 <a class="btn btn-pocketcasts" href="pktc://subscribe/{html.escape(feed_url_no_proto)}">Pocket Casts</a>
             </div>
-        </div>""")
+        </div>"""
+        )
 
     cards_html = "\n".join(cards)
 
