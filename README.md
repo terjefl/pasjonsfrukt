@@ -94,6 +94,34 @@ The index page (`GET /`) lists all configured podcasts as cards with title, desc
 
 ---
 
+### Checking CDN compatibility before adding a podcast
+
+Some PodMe podcasts distribute episodes via Acast's CDN (`flex2.acast.com`) instead of PodMe's own CDN. Acast episodes will always fail with 403 Forbidden and cannot be harvested — and the split between PodMe and Acast episodes within a single series is unpredictable, meaning some episodes may work while others silently fail.
+
+Before adding a new slug to `config.yaml`, run:
+
+```sh
+pasjonsfrukt check <slug>
+```
+
+This fetches the 20 most recent episodes and checks each download URL:
+
+```
+  ✅ 12345: PODME  (https://dd-podme.akamaized.net/...)
+  ❌ 12346: ACAST  (https://flex2.acast.com/s/...)
+
+Resultat for 'min-serie': 1/2 på PodMe-CDN
+❌ Ikke trygg – 1 episode er på Acast-CDN og vil feile med 403
+```
+
+Only add slugs where 100% of episodes are on PodMe CDN. Use `-n` to check more episodes:
+
+```sh
+pasjonsfrukt check <slug> -n 50
+```
+
+---
+
 ### Development
 
 #### Formatting
