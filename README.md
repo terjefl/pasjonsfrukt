@@ -58,6 +58,7 @@ yield_dir: "yield"
 #  region: NO          # NO, SE, FI (default: NO)
 #  request_timeout: 30.0
 #  disable_credentials_storage: false
+#  max_concurrent_downloads: 3
 
 auth:
   email: "your@email.com"
@@ -74,7 +75,7 @@ podcasts:
 
 **`secret`** adds a `?secret=<value>` query parameter requirement on all endpoints — useful for keeping feeds semi-private when hosted publicly.
 
-**`api`** lets you configure PodMe region and language (for SE/FI content), request timeout, and credential storage behaviour.
+**`api`** lets you configure PodMe region and language (for SE/FI content), request timeout, credential storage behaviour, and the maximum number of simultaneous episode downloads (`max_concurrent_downloads`, default: 3).
 
 ---
 
