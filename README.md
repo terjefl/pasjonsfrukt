@@ -17,7 +17,7 @@ The recommended way to run pasjonsfrukt is with Docker Compose.
 ```yaml
 services:
   pasjonsfrukt:
-    image: ghcr.io/terjefl/pasjonsfrukt:canary
+    image: ghcr.io/terjefl/pasjonsfrukt:latest
     container_name: pasjonsfrukt
     restart: unless-stopped
     ports:
