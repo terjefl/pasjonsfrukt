@@ -100,6 +100,7 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
                 path.unlink()
             if placeholder.exists():
                 shutil.copy2(placeholder, path)
+                path.with_suffix(".unavailable").touch()
                 print(f"[INFO] Placed unavailable-episode placeholder at {path.name}")
 
     await asyncio.gather(*[download_one(url, path) for url, path in download_infos])
@@ -182,15 +183,22 @@ def build_feed(
     title: str,
     description: str,
     image_url: str,
+    unavailable_ids: set[int] = None,
 ):
     secret_query_param = get_secret_query_parameter(config)
+    unavailable_ids = unavailable_ids or set()
     items = []
     for e in episodes:
         episode_id = e.id
         episode_path = f"{slug}/{episode_id}"
+        episode_title = (
+            f"[Ikke tilgjengelig] {e.title}"
+            if episode_id in unavailable_ids
+            else e.title
+        )
         items.append(
             Item(
-                title=e.title,
+                title=episode_title,
                 description=e.description,
                 guid=Guid(episode_id, isPermaLink=False),
                 enclosure=Enclosure(
@@ -239,6 +247,10 @@ async def sync_slug_feed(
     )
     episodes = await client.get_episodes_info(episode_ids)
     podcast_info = await client.get_podcast_info(slug)
+    podcast_dir = build_podcast_dir(config, slug)
+    unavailable_ids = {
+        int(f.stem) for f in podcast_dir.glob("*.unavailable") if f.stem.isdigit()
+    }
     feed = build_feed(
         config,
         episodes,
@@ -246,6 +258,7 @@ async def sync_slug_feed(
         podcast_info.title,
         podcast_info.description,
         podcast_info.image_url,
+        unavailable_ids=unavailable_ids,
     )
     build_podcast_dir(config, slug).mkdir(parents=True, exist_ok=True)
     with build_podcast_feed_path(config, slug).open("w", encoding="utf-8") as feed_file:
