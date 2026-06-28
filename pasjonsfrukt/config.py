@@ -23,6 +23,7 @@ class ApiConfig:
     region: Optional[str] = None  # "NO", "SE", "FI"
     request_timeout: float = 30.0
     disable_credentials_storage: bool = False
+    max_concurrent_downloads: int = 3
 
 
 @dataclass

@@ -7,6 +7,7 @@ yield_dir: "yield"
 #  region: NO          # NO, SE, FI (default: NO)
 #  request_timeout: 30.0
 #  disable_credentials_storage: false
+#  max_concurrent_downloads: 3
 auth:
   email: "<your-email-here>"
   password: "<your-password-here>"
