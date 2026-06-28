@@ -69,6 +69,10 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
     podcast_dir = build_podcast_dir(config, slug)
     podcast_dir.mkdir(parents=True, exist_ok=True)
 
+    for f in podcast_dir.glob("*_interim.mp3"):
+        print(f"[INFO] Removing stale interim file: {f.name}")
+        f.unlink()
+
     # harvest each missing episode
     download_urls = await client.get_episode_download_url_bulk(to_harvest)
     download_infos = [
