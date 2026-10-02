@@ -19,6 +19,25 @@ from .main import (
 cli = AsyncTyper()
 
 
+async def run_per_slug(slugs, action: str, func, client, config):
+    """
+    Run func for each slug, so one failing podcast (e.g. removed from PodMe)
+    doesn't stop the rest. Exits non-zero afterwards if any slug failed.
+    """
+    failed = []
+    for s in slugs:
+        try:
+            await func(client, config, s)
+        except Exception as e:
+            print(f"[FAIL] {action} of '{s}' failed: {type(e).__name__}: {e}")
+            failed.append(s)
+    if failed:
+        print(
+            f"[FAIL] {action} failed for {len(failed)} podcast(s): {', '.join(failed)}"
+        )
+        raise typer.Exit(code=1)
+
+
 @cli.command()
 async def harvest(
     podcast_slugs: Annotated[
@@ -45,8 +64,7 @@ async def harvest(
         config.auth.email, config.auth.password, config.api
     ) as client:
         to_harvest = config.podcasts.keys() if podcast_slugs is None else podcast_slugs
-        for s in to_harvest:
-            await harvest_podcast(client, config, s)
+        await run_per_slug(to_harvest, "Harvest", harvest_podcast, client, config)
 
 
 @cli.command("sync")
@@ -75,8 +93,7 @@ async def sync_feeds(
         config.auth.email, config.auth.password, config.api
     ) as client:
         to_sync = config.podcasts.keys() if podcast_slugs is None else podcast_slugs
-        for s in to_sync:
-            await sync_slug_feed(client, config, s)
+        await run_per_slug(to_sync, "Sync", sync_slug_feed, client, config)
 
 
 @cli.command(
