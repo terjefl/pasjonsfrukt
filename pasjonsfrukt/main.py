@@ -15,6 +15,7 @@ from podme_api.models import PodMeDownloadProgressTask
 from podme_api.const import PodMeRegion
 from podme_api.models import PodMeLanguage
 from rfeed import Item, Guid, Enclosure, Feed, Image, iTunesItem, iTunes
+from yarl import URL
 
 from .config import ApiConfig, Config, User
 
@@ -94,6 +95,7 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
     async def download_one(url, path):
         async with sem:
             try:
+                url = await resolve_redirects(client, url)
                 await client.download_file(
                     url, path, on_progress=log_progress, on_finished=log_finished
                 )
@@ -111,6 +113,26 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
     await asyncio.gather(*[download_one(url, path) for url, path in download_infos])
 
     await sync_slug_feed(client, config, slug, harvested_ids=harvested_ids + to_harvest)
+
+
+async def resolve_redirects(client: PodMeClient, url, max_hops: int = 10) -> URL:
+    """
+    Follow redirects without re-quoting the Location headers.
+
+    Acast (e.g. E24-podden) redirects to a signed stitcher URL. aiohttp/yarl
+    re-quote that URL when following redirects, which breaks the signature and
+    gives 403, so every download failed and got a placeholder. Resolving the
+    final URL with encoded=True and passing that to download_file avoids it.
+    """
+    client._ensure_session()
+    url = URL(str(url), encoded=True)
+    for _ in range(max_hops):
+        async with client.session.get(url, allow_redirects=False) as resp:
+            location = resp.headers.get("Location")
+            if resp.status not in (301, 302, 303, 307, 308) or not location:
+                return url
+            url = url.join(URL(location, encoded=True))
+    return url
 
 
 async def harvested_episode_ids(client: PodMeClient, config: Config, slug: str):
