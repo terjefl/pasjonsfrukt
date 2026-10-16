@@ -25,6 +25,7 @@ yield_dir: "yield"                  # Directory for downloaded MP3s and generate
 #  request_timeout: 30.0           # HTTP timeout in seconds (default: 30.0)
 #  disable_credentials_storage: false  # Don't cache auth tokens to disk (default: false)
 #  max_concurrent_downloads: 3     # Max simultaneous episode downloads (default: 3)
+#  health_max_harvest_age: 36000   # GET /health returns 503 if last harvest is older than this, seconds (default: 10h)
 
 auth:
   email: "<your-email-here>"

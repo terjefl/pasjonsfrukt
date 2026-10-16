@@ -24,6 +24,9 @@ class ApiConfig:
     request_timeout: float = 30.0
     disable_credentials_storage: bool = False
     max_concurrent_downloads: int = 3
+    health_max_harvest_age: int = (
+        36000  # /health reports 503 if the last harvest is older than this (10h: covers the 20:00-05:00 cron gap)
+    )
 
 
 @dataclass

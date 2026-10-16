@@ -118,6 +118,7 @@ api:
   request_timeout: 30.0            # HTTP timeout in seconds (default: 30.0)
   disable_credentials_storage: false  # Don't cache auth tokens to disk (default: false)
   max_concurrent_downloads: 3      # Max simultaneous episode downloads (default: 3)
+  health_max_harvest_age: 36000   # /health returns 503 if the last harvest is older than this, in seconds (default: 10h)
 ```
 
 `max_concurrent_downloads` limits how many episodes are downloaded in parallel during a harvest. Reduce it if you hit rate limits or want to lower network load.
@@ -149,10 +150,17 @@ File location on disk:
 | `GET /` | HTML index of all configured podcasts |
 | `GET /{slug}` | RSS feed for a podcast |
 | `GET /{slug}/{episode_id}` | Episode audio file |
+| `GET /health` | Unauthenticated health check (JSON), 200 or 503 |
 
 **With `secret`:** append `?secret=<value>` to all requests.
 
 **With `users`:** append `?secret=<user-secret>` to all requests. The RSS feed at `GET /{slug}` will contain episode URLs pre-populated with that user's secret, so podcast apps fetch audio correctly without further configuration.
+
+#### Health check
+
+`GET /health` needs no secret and is meant for monitoring tools such as Uptime Kuma. It returns `200` with `{"status": "ok", ...}` when the server is up, every podcast has its feed file(s), and the last full `pasjonsfrukt harvest` finished within `api.health_max_harvest_age` seconds (default 10 hours, which covers a nightly pause in the cron schedule) without any failed podcast. Otherwise it returns `503` with the reasons listed in `problems`. The response also carries `last_harvest`, `last_harvest_age_seconds` and `last_harvest_duration_seconds`, and never includes secrets.
+
+The harvest status is written to `<yield_dir>/.harvest-status.json` at the end of every full harvest (runs limited to specific slugs do not update it). All log lines from `harvest` and `sync` are prefixed with a timestamp.
 
 #### Podcast index page
 

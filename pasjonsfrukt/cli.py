@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from typing import Optional, Annotated
 import typer
 import uvicorn
@@ -14,9 +15,12 @@ from .main import (
     sync_slug_feed,
     harvest_podcast,
     check_slug_compatibility,
+    log,
+    write_harvest_status,
 )
 
-cli = AsyncTyper()
+# Never dump local variables (they include the parsed config with credentials) into tracebacks.
+cli = AsyncTyper(pretty_exceptions_show_locals=False)
 
 
 async def run_per_slug(slugs, action: str, func, client, config):
@@ -29,13 +33,11 @@ async def run_per_slug(slugs, action: str, func, client, config):
         try:
             await func(client, config, s)
         except Exception as e:
-            print(f"[FAIL] {action} of '{s}' failed: {type(e).__name__}: {e}")
+            log(f"[FAIL] {action} of '{s}' failed: {type(e).__name__}: {e}")
             failed.append(s)
     if failed:
-        print(
-            f"[FAIL] {action} failed for {len(failed)} podcast(s): {', '.join(failed)}"
-        )
-        raise typer.Exit(code=1)
+        log(f"[FAIL] {action} failed for {len(failed)} podcast(s): {', '.join(failed)}")
+    return failed
 
 
 @cli.command()
@@ -60,11 +62,30 @@ async def harvest(
     Scrape podcast episodes
     """
     config = config_from_stream(config_stream)
-    async with get_podme_client(
-        config.auth.email, config.auth.password, config.api
-    ) as client:
-        to_harvest = config.podcasts.keys() if podcast_slugs is None else podcast_slugs
-        await run_per_slug(to_harvest, "Harvest", harvest_podcast, client, config)
+    log("[INFO] Harvest started")
+    started = datetime.now(timezone.utc)
+    full_run = podcast_slugs is None
+    try:
+        async with get_podme_client(
+            config.auth.email, config.auth.password, config.api
+        ) as client:
+            to_harvest = config.podcasts.keys() if full_run else podcast_slugs
+            failed = await run_per_slug(
+                to_harvest, "Harvest", harvest_podcast, client, config
+            )
+    except Exception as exc:
+        log(f"[FAIL] Harvest aborted: {type(exc).__name__}: {exc}")
+        if full_run:
+            write_harvest_status(
+                config, started, [], error=f"{type(exc).__name__}: {exc}"
+            )
+        raise typer.Exit(code=1)
+    # Only a full run (all podcasts) counts as "the last harvest" for /health.
+    if full_run:
+        write_harvest_status(config, started, failed)
+    log("[INFO] Harvest finished")
+    if failed:
+        raise typer.Exit(code=1)
 
 
 @cli.command("sync")
@@ -93,7 +114,9 @@ async def sync_feeds(
         config.auth.email, config.auth.password, config.api
     ) as client:
         to_sync = config.podcasts.keys() if podcast_slugs is None else podcast_slugs
-        await run_per_slug(to_sync, "Sync", sync_slug_feed, client, config)
+        failed = await run_per_slug(to_sync, "Sync", sync_slug_feed, client, config)
+    if failed:
+        raise typer.Exit(code=1)
 
 
 @cli.command(

@@ -1,7 +1,9 @@
 import asyncio
 import contextlib
+import json
 import re
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +20,40 @@ from rfeed import Item, Guid, Enclosure, Feed, Image, iTunesItem, iTunes
 from yarl import URL
 
 from .config import ApiConfig, Config, User
+
+
+def log(msg: str):
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+
+
+# --- Harvest status (read by GET /health) ---
+
+
+def harvest_status_path(config: Config) -> Path:
+    return Path(config.yield_dir) / ".harvest-status.json"
+
+
+def write_harvest_status(
+    config: Config, started: datetime, failed: list[str], error: Optional[str] = None
+):
+    finished = datetime.now(timezone.utc)
+    status = {
+        "started": started.isoformat(timespec="seconds"),
+        "finished": finished.isoformat(timespec="seconds"),
+        "duration_seconds": int((finished - started).total_seconds()),
+        "failed": failed,
+        "error": error,
+    }
+    path = harvest_status_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(status, indent=2))
+
+
+def read_harvest_status(config: Config) -> Optional[dict]:
+    try:
+        return json.loads(harvest_status_path(config).read_text())
+    except (FileNotFoundError, ValueError):
+        return None
 
 
 @contextlib.asynccontextmanager
@@ -45,7 +81,7 @@ async def get_podme_client(email: str, password: str, api_config: ApiConfig = No
 
 async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
     if slug not in config.podcasts:
-        print(f"[FAIL] The slug '{slug}' did not match any podcasts in the config file")
+        log(f"[FAIL] The slug '{slug}' did not match any podcasts in the config file")
         return
     most_recent_episodes_limit = config.podcasts[slug].most_recent_episodes_limit
     if most_recent_episodes_limit is None:
@@ -54,19 +90,19 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
         episodes = await client.get_latest_episodes(slug, most_recent_episodes_limit)
 
     if len(episodes) == 0:
-        print(f"[WARN] Could not find any published episodes for '{slug}'")
+        log(f"[WARN] Could not find any published episodes for '{slug}'")
         return
 
     published_ids = [e.id for e in episodes]
     harvested_ids = await harvested_episode_ids(client, config, slug)
     to_harvest = [e for e in published_ids if e not in harvested_ids]
     if len(to_harvest) == 0:
-        print(
+        log(
             f"[INFO] Nothing new from '{slug}', all available episodes already harvested"
             f"{f' (only looking at {most_recent_episodes_limit} most recent)' if most_recent_episodes_limit is not None else ''}"
         )
         return
-    print(
+    log(
         f"[INFO] Found {len(to_harvest)} new episode{'s' if len(to_harvest) > 1 else ''} of '{slug}' ready to harvest"
         f"{f' (only looking at {most_recent_episodes_limit} most recent)' if most_recent_episodes_limit is not None else ''}"
     )
@@ -74,7 +110,7 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
     podcast_dir.mkdir(parents=True, exist_ok=True)
 
     for f in podcast_dir.glob("*_interim.mp3"):
-        print(f"[INFO] Removing stale interim file: {f.name}")
+        log(f"[INFO] Removing stale interim file: {f.name}")
         f.unlink()
 
     # harvest each missing episode
@@ -84,10 +120,10 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
     ]
 
     def log_progress(_: PodMeDownloadProgressTask, url: str, progress: int, total: int):
-        print(f"[INFO] Downloading from {url}: {progress}/{total}.")
+        log(f"[INFO] Downloading from {url}: {progress}/{total}.")
 
     def log_finished(url: str, path: str):
-        print(f"[INFO] Finished downloading {url} to {path}.")
+        log(f"[INFO] Finished downloading {url} to {path}.")
 
     placeholder = Path(__file__).parent.parent / "episode_not_available.mp3"
     sem = asyncio.Semaphore(config.api.max_concurrent_downloads)
@@ -100,15 +136,13 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
                     url, path, on_progress=log_progress, on_finished=log_finished
                 )
             except Exception as e:
-                print(f"[WARN] Download failed for {path.name}: {e}")
+                log(f"[WARN] Download failed for {path.name}: {e}")
                 if path.exists():
                     path.unlink()
                 if placeholder.exists():
                     shutil.copy2(placeholder, path)
                     path.with_suffix(".unavailable").touch()
-                    print(
-                        f"[INFO] Placed unavailable-episode placeholder at {path.name}"
-                    )
+                    log(f"[INFO] Placed unavailable-episode placeholder at {path.name}")
 
     await asyncio.gather(*[download_one(url, path) for url, path in download_infos])
 
@@ -160,7 +194,7 @@ ACAST_CDN_HOST = "flex2.acast.com"
 async def check_slug_compatibility(client: PodMeClient, slug: str, episode_count: int):
     episodes = await client.get_latest_episodes(slug, episode_count)
     if not episodes:
-        print(f"[WARN] No episodes found for '{slug}'")
+        log(f"[WARN] No episodes found for '{slug}'")
         return
     episode_ids = [e.id for e in episodes]
     download_urls = await client.get_episode_download_url_bulk(episode_ids)
@@ -215,7 +249,11 @@ def build_feed(
     unavailable_ids: set[int] = None,
     secret: Optional[str] = None,
 ):
-    secret_query_param = f"?secret={secret}" if secret is not None else get_secret_query_parameter(config)
+    secret_query_param = (
+        f"?secret={secret}"
+        if secret is not None
+        else get_secret_query_parameter(config)
+    )
     unavailable_ids = unavailable_ids or set()
     items = []
     for e in episodes:
@@ -267,9 +305,9 @@ async def sync_slug_feed(
     harvested_ids: list[int] = None,
 ):
     if slug not in config.podcasts:
-        print(f"[FAIL] The slug '{slug}' did not match any podcasts in the config file")
+        log(f"[FAIL] The slug '{slug}' did not match any podcasts in the config file")
         return
-    print(f"[INFO] Syncing '{slug}' feed...")
+    log(f"[INFO] Syncing '{slug}' feed...")
     episode_ids = (
         harvested_ids
         if harvested_ids is not None
@@ -294,9 +332,11 @@ async def sync_slug_feed(
                 unavailable_ids=unavailable_ids,
                 secret=user.secret,
             )
-            with build_podcast_feed_path(config, slug, alias=user.alias).open("w", encoding="utf-8") as feed_file:
+            with build_podcast_feed_path(config, slug, alias=user.alias).open(
+                "w", encoding="utf-8"
+            ) as feed_file:
                 feed_file.write(feed)
-        print(
+        log(
             f"[INFO] '{slug}' feed written for {len(config.users)} user{'s' if len(config.users) != 1 else ''}"
             f" ({len(episodes)} episode{'s' if len(episodes) != 1 else ''})"
         )
@@ -310,8 +350,10 @@ async def sync_slug_feed(
             podcast_info.image_url,
             unavailable_ids=unavailable_ids,
         )
-        with build_podcast_feed_path(config, slug).open("w", encoding="utf-8") as feed_file:
+        with build_podcast_feed_path(config, slug).open(
+            "w", encoding="utf-8"
+        ) as feed_file:
             feed_file.write(feed)
-        print(
+        log(
             f"[INFO] '{slug}' feed now serving {len(episodes)} episode{'s' if len(episodes) != 1 else ''}"
         )
