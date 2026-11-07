@@ -6,6 +6,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urljoin
 
 from podme_api import (
     PodMeDefaultAuthClient,
@@ -109,7 +110,7 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
     podcast_dir = build_podcast_dir(config, slug)
     podcast_dir.mkdir(parents=True, exist_ok=True)
 
-    for f in podcast_dir.glob("*_interim.mp3"):
+    for f in podcast_dir.glob("*_interim*"):
         log(f"[INFO] Removing stale interim file: {f.name}")
         f.unlink()
 
@@ -132,9 +133,16 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
         async with sem:
             try:
                 url = await resolve_redirects(client, url)
-                await client.download_file(
-                    url, path, on_progress=log_progress, on_finished=log_finished
-                )
+                if is_hls_url(url):
+                    await download_hls_audio(client, url, path)
+                else:
+                    await client.download_file(
+                        url, path, on_progress=log_progress, on_finished=log_finished
+                    )
+                    if is_hls_playlist_file(path):
+                        # Served as a playlist without .m3u8 in the URL
+                        path.unlink()
+                        await download_hls_audio(client, url, path)
             except Exception as e:
                 log(f"[WARN] Download failed for {path.name}: {e}")
                 if path.exists():
@@ -169,6 +177,171 @@ async def resolve_redirects(client: PodMeClient, url, max_hops: int = 10) -> URL
     return url
 
 
+def is_hls_url(url) -> bool:
+    return ".m3u8" in URL(str(url), encoded=True).path
+
+
+def is_hls_playlist_file(path: Path) -> bool:
+    """True if the file is an HLS playlist (text) rather than audio."""
+    try:
+        if path.stat().st_size > 1024 * 1024:
+            return False
+        with path.open("rb") as f:
+            return f.read(7) == b"#EXTM3U"
+    except OSError:
+        return False
+
+
+def _hls_attrs(line: str) -> dict[str, str]:
+    """Parse the attribute list of an HLS tag line (KEY=VALUE,KEY="VALUE")."""
+    _, _, attrs = line.partition(":")
+    return {
+        k: v.strip('"') for k, v in re.findall(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)', attrs)
+    }
+
+
+async def _hls_get(client: PodMeClient, url: str) -> bytes:
+    # encoded=True: the Akamai URLs are signed and must be sent byte for byte
+    async with client.session.get(URL(url, encoded=True)) as resp:
+        resp.raise_for_status()
+        return await resp.read()
+
+
+def _hls_audio_playlist(master_url: str, master: str) -> str:
+    """Pick the audio-only media playlist from an HLS master playlist."""
+    lines = master.splitlines()
+    # Audio-only variant: #EXT-X-STREAM-INF with only an mp4a codec
+    for i, line in enumerate(lines[:-1]):
+        if line.startswith("#EXT-X-STREAM-INF"):
+            codecs = _hls_attrs(line).get("CODECS", "")
+            if codecs and all(c.strip().startswith("mp4a") for c in codecs.split(",")):
+                return urljoin(master_url, lines[i + 1].strip())
+    # Separate audio rendition
+    for line in lines:
+        if line.startswith("#EXT-X-MEDIA") and "TYPE=AUDIO" in line:
+            uri = _hls_attrs(line).get("URI")
+            if uri:
+                return urljoin(master_url, uri)
+    raise RuntimeError("No audio playlist found in HLS master playlist")
+
+
+async def _aes128_decrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
+    proc = await asyncio.create_subprocess_exec(
+        "openssl", "enc", "-d", "-aes-128-cbc", "-K", key.hex(), "-iv", iv.hex(),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )  # fmt: skip
+    out, err = await proc.communicate(data)
+    if proc.returncode != 0:
+        raise RuntimeError(f"AES-128 decryption failed: {err.decode(errors='replace')}")
+    return out
+
+
+async def download_hls_audio(
+    client: PodMeClient, url, path: Path, concurrency: int = 8
+):
+    """
+    Download the audio track of an HLS stream.
+
+    Video podcasts (e.g. Papaya) are delivered as an HLS master playlist with
+    video variants and an audio-only playlist of AES-128 encrypted fMP4
+    segments. Downloading the URL directly just saves the playlist text, and
+    ffmpeg (5.1 in the image) stops after the first encrypted fMP4 segment.
+    So fetch and decrypt the audio segments here, concatenate them after the
+    init segment, and let ffmpeg remux the result (no re-encoding) into a
+    regular MP4 container, like the other episodes.
+
+    Relative URIs are resolved with urljoin on plain strings: yarl's join
+    normalises the signed path (%2f -> /), and Akamai then answers 403.
+    """
+    client._ensure_session()
+    master_url = str(url)
+    master = (await _hls_get(client, master_url)).decode()
+    if "#EXT-X-STREAM-INF" in master:
+        playlist_url = _hls_audio_playlist(master_url, master)
+        playlist = (await _hls_get(client, playlist_url)).decode()
+    else:
+        playlist_url, playlist = master_url, master
+
+    init_url = None
+    segments = []  # (url, key_info, sequence number)
+    key_info = None
+    sequence = 0
+    for line in playlist.splitlines():
+        line = line.strip()
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            sequence = int(line.split(":", 1)[1])
+        elif line.startswith("#EXT-X-MAP:"):
+            init_url = urljoin(playlist_url, _hls_attrs(line)["URI"])
+        elif line.startswith("#EXT-X-KEY:"):
+            attrs = _hls_attrs(line)
+            method = attrs.get("METHOD", "NONE")
+            if method == "NONE":
+                key_info = None
+            elif method == "AES-128":
+                key_info = (
+                    urljoin(playlist_url, attrs["URI"]),
+                    attrs.get("IV"),
+                )
+            else:
+                raise RuntimeError(f"Unsupported HLS encryption method {method}")
+        elif line and not line.startswith("#"):
+            segments.append((urljoin(playlist_url, line), key_info, sequence))
+            sequence += 1
+    if not segments:
+        raise RuntimeError("HLS audio playlist has no segments")
+
+    keys: dict[str, bytes] = {}
+    for _, info, _ in segments:
+        if info is not None and info[0] not in keys:
+            keys[info[0]] = await _hls_get(client, info[0])
+
+    async def fetch_segment(seg_url, info, seq):
+        data = await _hls_get(client, seg_url)
+        if info is None:
+            return data
+        key_url, iv = info
+        iv_bytes = (
+            bytes.fromhex(iv[2:] if iv.lower().startswith("0x") else iv)
+            if iv
+            else seq.to_bytes(16, "big")
+        )
+        return await _aes128_decrypt(keys[key_url], iv_bytes, data)
+
+    log(f"[INFO] Downloading {len(segments)} HLS audio segments for {path.name}")
+    fragments = path.with_name(f"{path.stem}_interim.frag.mp4")
+    interim = path.with_stem(f"{path.stem}_interim")
+    try:
+        with fragments.open("wb") as f:
+            if init_url is not None:
+                f.write(await _hls_get(client, init_url))
+            for i in range(0, len(segments), concurrency):
+                batch = segments[i : i + concurrency]
+                for data in await asyncio.gather(*(fetch_segment(*s) for s in batch)):
+                    f.write(data)
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(fragments),
+            "-map", "0:a:0", "-vn", "-c:a", "copy",
+            "-map_metadata", "-1",
+            "-f", "mp4", "-brand", "isomiso2mp41",
+            str(interim),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )  # fmt: skip
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0 or not interim.exists() or interim.stat().st_size == 0:
+            raise RuntimeError(
+                f"ffmpeg failed ({proc.returncode}): {stderr.decode(errors='replace')[-500:]}"
+            )
+        interim.replace(path)
+    finally:
+        fragments.unlink(missing_ok=True)
+        interim.unlink(missing_ok=True)
+    log(f"[INFO] Finished downloading HLS audio to {path}")
+
+
 async def harvested_episode_ids(client: PodMeClient, config: Config, slug: str):
     podcast_dir = build_podcast_dir(config, slug)
     if not podcast_dir.is_dir():
@@ -182,6 +355,14 @@ async def harvested_episode_ids(client: PodMeClient, config: Config, slug: str):
         m = re.match(r"^(\d+)\.mp3$", f.name)  # fix #1: only match numeric filenames
         if m is not None:
             episode_id = int(m.group(1))
+            if is_hls_playlist_file(f):
+                # Earlier versions saved the HLS playlist instead of the audio.
+                # Remove it so the episode is harvested again.
+                log(
+                    f"[INFO] Removing broken playlist file {slug}/{f.name}, will re-harvest"
+                )
+                f.unlink()
+                continue
             if episode_id in episode_ids:
                 harvested.append(episode_id)
     return harvested
