@@ -56,7 +56,7 @@ The image runs in one of two modes, selected with `PASJONSFRUKT_MODE`:
 - `web` (default): only the HTTP server. No crontab and no cron daemon.
 - `harvest`: only cron with the mounted crontab, no server.
 
-Run them as two containers from the same image, as above, so the bulk writes of a harvest to the share do not share a process, cgroup or I/O queue with the server. Downloads go to `STAGING_DIR` (default `/app/staging`; bind-mount local disk there) and are then copied to `yield_dir` as `<name>.part`, fsynced and renamed to the final name, so clients never see a half-written file on the share. Staging files and `.part` files older than an hour are removed when a harvest starts.
+Run them as two containers from the same image, as above, so the bulk writes of a harvest to the share do not share a process, cgroup or I/O queue with the server. Downloads go to `STAGING_DIR` (default `/app/staging`; bind-mount local disk there) and are then copied to `yield_dir` as `<name>.part`, fsynced and renamed to the final name, so clients never see a half-written file on the share. Staging files and `.part` files older than an hour are removed when a harvest starts. Only one harvest runs at a time: a run that starts while another holds the lock is skipped. The lock file is in the container's `/tmp`, so it applies per container. Run a manual `pasjonsfrukt harvest` in the harvest container (`docker exec pasjonsfrukt-harvest pasjonsfrukt harvest`), not in the web container.
 
 The crontab controls when harvesting runs. It is installed with `crontab` inside the harvest container, so use the user-crontab format (no user column). Avoid starting on the hour, when other jobs (e.g. Plex analysis) often read the same share. Example:
 
