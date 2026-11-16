@@ -1,4 +1,8 @@
+import fcntl
+import hashlib
 import os
+import tempfile
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Annotated
 import typer
@@ -62,6 +66,22 @@ async def harvest(
     Scrape podcast episodes
     """
     config = config_from_stream(config_stream)
+
+    # Two overlapping runs would download the same episodes to the same staging file and
+    # .part on the share, and could publish or remove each other's half-written files.
+    # The lock lives on the local filesystem, not in yield_dir, because network shares
+    # (CIFS/NFS) handle flock unreliably. Same lock as in podimo.
+    lock_name = hashlib.sha256(os.path.abspath(config.yield_dir).encode()).hexdigest()[
+        :16
+    ]
+    lock_path = Path(tempfile.gettempdir()) / f"pasjonsfrukt-harvest-{lock_name}.lock"
+    lock_file = lock_path.open("w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, PermissionError):
+        log("[WARN] Another harvest is already running, skipping this run")
+        raise typer.Exit(code=0)
+
     log("[INFO] Harvest started")
     clean_staging()
     started = datetime.now(timezone.utc)
@@ -152,6 +172,13 @@ def serve_api(
     config_path = getattr(config_stream, "name", None)
     if isinstance(config_path, str) and os.path.isfile(config_path):
         os.environ[api.CONFIG_ENV] = os.path.abspath(config_path)
+    elif workers_requested(ctx.args) > 1:
+        # stdin or a path that is not a regular file: the workers could not load it and
+        # every request would fail with 500
+        raise typer.BadParameter(
+            "--workers > 1 needs the configuration in a file (not stdin)",
+            param_hint="--config-file",
+        )
     # also installed on startup in every worker (api._startup)
     api.install_secret_filter(config)
     uvicorn.main.main(args=ctx.args)
@@ -211,3 +238,19 @@ def callback():
     """
     Scrape PodMe podcast streams to mp3 and host with RSS feed
     """
+
+
+def workers_requested(args: list[str]) -> int:
+    """The value of uvicorn's --workers in the extra args (1 when not given or not a number)."""
+    for i, a in enumerate(args):
+        value = None
+        if a == "--workers" and i + 1 < len(args):
+            value = args[i + 1]
+        elif a.startswith("--workers="):
+            value = a.split("=", 1)[1]
+        if value is not None:
+            try:
+                return int(value)
+            except ValueError:
+                return 1
+    return 1

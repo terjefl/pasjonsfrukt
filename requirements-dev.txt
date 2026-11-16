@@ -1,3 +1,5 @@
 # Test dependencies (the app itself is installed with poetry; see Dockerfile)
 pytest>=8
 httpx>=0.27
+# asyncer 0.0.8 imports sniffio without declaring it; poetry gets it through anyio
+sniffio

@@ -37,9 +37,9 @@ class RSSResponse(FileResponse):
 
 CONFIG_ENV = "PASJONSFRUKT_CONFIG_FILE"
 STATUS_TTL_S = 60  # /status result is reused this long, so N podcasts x stat() on the share is not repeated per probe
-STATUS_TIMEOUT_S = (
-    10  # /status answers 503 after this long instead of waiting on a hanging share
-)
+# /status answers 503 after this long instead of waiting on a hanging share
+# (20 s: the share is 5-11 s slow during the nightly backup window, which must not give 503)
+STATUS_TIMEOUT_S = 20
 
 _started = time.monotonic()
 _clock = time.monotonic  # replaced in tests
@@ -376,6 +376,15 @@ async def get_status(config: Config = Depends(api_config)):
     failed in two full harvests in a row does. The result is cached for STATUS_TTL_S
     seconds. Never includes secrets or episode data, and makes no external calls.
     """
+    if config is None:
+        # no override and no readable config file: say so instead of failing with 500
+        body = {
+            "status": "error",
+            "problems": ["no configuration loaded"],
+            "podcasts": 0,
+            "warnings": [],
+        }
+        return JSONResponse(body, status_code=503)
     code, body = await cached_status(config)
     return JSONResponse(body, status_code=code)
 
