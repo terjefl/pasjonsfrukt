@@ -31,7 +31,7 @@ services:
       - /path/to/crontab:/etc/cron.d/pasjonsfrukt-crontab:ro
       - /path/to/podcast/files:/app/yield
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/openapi.json || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -42,6 +42,15 @@ The crontab controls when harvesting runs. Example:
 
 ```cron
 0 4 * * * root pasjonsfrukt harvest >> /var/log/pasjonsfrukt.log 2>&1
+```
+
+---
+
+### Tests
+
+```sh
+pip install -e . -r requirements-dev.txt
+pytest
 ```
 
 ---
@@ -118,7 +127,7 @@ api:
   request_timeout: 30.0            # HTTP timeout in seconds (default: 30.0)
   disable_credentials_storage: false  # Don't cache auth tokens to disk (default: false)
   max_concurrent_downloads: 3      # Max simultaneous episode downloads (default: 3)
-  health_max_harvest_age: 36000   # /health returns 503 if the last harvest is older than this, in seconds (default: 10h)
+  health_max_harvest_age: 36000   # /status returns 503 if the last harvest is older than this, in seconds (default: 10h)
 ```
 
 `max_concurrent_downloads` limits how many episodes are downloaded in parallel during a harvest. Reduce it if you hit rate limits or want to lower network load.
@@ -150,7 +159,8 @@ File location on disk:
 | `GET /` | HTML index of all configured podcasts |
 | `GET /{slug}` | RSS feed for a podcast |
 | `GET /{slug}/{episode_id}` | Episode audio file |
-| `GET /health` | Unauthenticated health check (JSON), 200 or 503 |
+| `GET /health` | Unauthenticated liveness check (JSON), always 200 while the process answers |
+| `GET /status` | Unauthenticated deep check (JSON), 200 or 503, cached for 60 s |
 
 **With `secret`:** append `?secret=<value>` to all requests.
 
@@ -158,7 +168,11 @@ File location on disk:
 
 #### Health check
 
-`GET /health` needs no secret and is meant for monitoring tools such as Uptime Kuma. It returns `200` with `{"status": "ok", ...}` when the server is up, every podcast has its feed file(s), and the last full `pasjonsfrukt harvest` finished within `api.health_max_harvest_age` seconds (default 10 hours, which covers a nightly pause in the cron schedule) without any failed podcast. Otherwise it returns `503` with the reasons listed in `problems`. The response also carries `last_harvest`, `last_harvest_age_seconds` and `last_harvest_duration_seconds`, and never includes secrets.
+`GET /health` is the liveness check for the Docker healthcheck and monitoring (InfraDash, Uptime Kuma). It needs no secret, does no file I/O and has no dependencies, so it returns `200` with `{"status": "ok", "version": ..., "uptime_seconds": ...}` as long as the process answers, also when the share with `yield_dir` is slow or missing.
+
+`GET /status` is the deep check, also without a secret. It returns `200` with `{"status": "ok", ...}` when every podcast has its feed file(s) and the last full `pasjonsfrukt harvest` finished within `api.health_max_harvest_age` seconds (default 10 hours, which covers a nightly pause in the cron schedule) without a persistent failure. Otherwise it returns `503` with the reasons listed in `problems`. A podcast that failed in the last full harvest but not in the one before is listed under `warnings` and does not give `503`; one that fails in two full harvests in a row does. The response also carries `last_harvest`, `last_harvest_age_seconds` and `last_harvest_duration_seconds`, and never includes secrets. The file lookups run in a thread, the result is cached for 60 seconds, and a lookup that takes more than 10 seconds gives `503` instead of hanging.
+
+`pasjonsfrukt serve` passes extra options to uvicorn, including `--workers N`. Each worker reads the same config file (through `PASJONSFRUKT_CONFIG_FILE`, which `serve` sets), and secrets are redacted from the access log in every worker.
 
 The harvest status is written to `<yield_dir>/.harvest-status.json` at the end of every full harvest (runs limited to specific slugs do not update it). All log lines from `harvest` and `sync` are prefixed with a timestamp.
 

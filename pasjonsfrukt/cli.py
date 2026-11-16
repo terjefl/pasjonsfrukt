@@ -1,4 +1,4 @@
-import logging
+import os
 from datetime import datetime, timezone
 from typing import Optional, Annotated
 import typer
@@ -9,7 +9,6 @@ from . import api
 from .api import api as api_app, api_config
 from .async_cli import AsyncTyper
 from .config import config_from_stream
-from .logging_utils import LogRedactSecretFilter
 from .main import (
     get_podme_client,
     sync_slug_feed,
@@ -146,15 +145,13 @@ def serve_api(
     ctx.args.insert(0, f"{api.__name__}:api")
     config = config_from_stream(config_stream)
     api_app.dependency_overrides[api_config] = lambda: config
-    secrets_to_redact = []
-    if config.secret is not None:
-        secrets_to_redact.append(config.secret)
-    if config.users:
-        secrets_to_redact.extend(u.secret for u in config.users)
-    if secrets_to_redact:
-        secret_filter = LogRedactSecretFilter(secrets_to_redact)
-        logging.getLogger("uvicorn.access").addFilter(secret_filter)
-        logging.getLogger("uvicorn.error").addFilter(secret_filter)
+    # Workers started with --workers N are new processes without the override above;
+    # they read the same file through PASJONSFRUKT_CONFIG_FILE (see api.api_config).
+    config_path = getattr(config_stream, "name", None)
+    if isinstance(config_path, str) and os.path.isfile(config_path):
+        os.environ[api.CONFIG_ENV] = os.path.abspath(config_path)
+    # also installed on startup in every worker (api._startup)
+    api.install_secret_filter(config)
     uvicorn.main.main(args=ctx.args)
 
 

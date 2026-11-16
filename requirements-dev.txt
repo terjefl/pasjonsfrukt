@@ -1,0 +1,3 @@
+# Test dependencies (the app itself is installed with poetry; see Dockerfile)
+pytest>=8
+httpx>=0.27
