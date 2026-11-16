@@ -10,6 +10,7 @@ from .api import api as api_app, api_config
 from .async_cli import AsyncTyper
 from .config import config_from_stream
 from .main import (
+    clean_staging,
     get_podme_client,
     sync_slug_feed,
     harvest_podcast,
@@ -62,6 +63,7 @@ async def harvest(
     """
     config = config_from_stream(config_stream)
     log("[INFO] Harvest started")
+    clean_staging()
     started = datetime.now(timezone.utc)
     full_run = podcast_slugs is None
     try:

@@ -1,10 +1,13 @@
 import asyncio
 import contextlib
 import json
+import os
 import re
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from time import time
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -25,6 +28,113 @@ from .config import ApiConfig, Config, User
 
 def log(msg: str):
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+
+
+# --- Staging and atomic publishing ---
+#
+# Downloads are written to a local staging directory first and only then copied to
+# yield_dir (usually a CIFS/SMB share): copy to <name>.part, fsync, os.replace to the
+# final name. Clients never see a half-written file on the share, and the share gets
+# short bursts instead of a long, live write stream.
+
+STAGING_ENV = "STAGING_DIR"
+DEFAULT_STAGING_DIR = "/app/staging"  # bind-mounted from local disk in Docker
+STALE_AGE_S = (
+    3600  # staging/.part files older than this are left over from a crashed run
+)
+
+
+def staging_dir() -> Path:
+    """The local staging directory; falls back to the temp dir outside Docker."""
+    for candidate in (os.environ.get(STAGING_ENV), DEFAULT_STAGING_DIR):
+        if not candidate:
+            continue
+        path = Path(candidate)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        except OSError:
+            continue
+    path = Path(tempfile.gettempdir()) / "pasjonsfrukt-staging"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def staging_path_for(final: Path) -> Path:
+    """Where a download for `final` is written before it is published."""
+    return staging_dir() / f"{final.parent.name}__{final.name}"
+
+
+def _fsync_dir(path: Path):
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass  # not supported on every file system (e.g. some CIFS mounts)
+    finally:
+        os.close(fd)
+
+
+def publish_file(src: Path, final: Path, move: bool = True):
+    """Copy `src` to `final` atomically: <final>.part, fsync, os.replace. Removes `src` when `move`."""
+    final.parent.mkdir(parents=True, exist_ok=True)
+    part = final.with_name(final.name + ".part")
+    try:
+        with src.open("rb") as fin, part.open("wb") as fout:
+            shutil.copyfileobj(fin, fout, 1024 * 1024)
+            fout.flush()
+            os.fsync(fout.fileno())
+        os.replace(part, final)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    _fsync_dir(final.parent)
+    if move:
+        src.unlink(missing_ok=True)
+
+
+def write_text_atomic(final: Path, text: str):
+    """Write a small text file (feed, status) so readers see either the old or the new version."""
+    final.parent.mkdir(parents=True, exist_ok=True)
+    part = final.with_name(final.name + ".part")
+    try:
+        with part.open("w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(part, final)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+
+
+def remove_stale(
+    directory: Path, pattern: str, max_age_s: int = STALE_AGE_S
+) -> list[Path]:
+    """Delete files matching `pattern` older than `max_age_s` (newer ones may belong to a running harvest)."""
+    removed = []
+    cutoff = time() - max_age_s
+    try:
+        candidates = list(directory.glob(pattern))
+    except OSError:
+        return removed
+    for f in candidates:
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+                removed.append(f)
+        except OSError:
+            continue
+    return removed
+
+
+def clean_staging():
+    """Remove downloads left in the staging directory by a crashed harvest."""
+    for f in remove_stale(staging_dir(), "*"):
+        log(f"[INFO] Removed stale staging file: {f.name}")
 
 
 # --- Harvest status (read by GET /status) ---
@@ -76,9 +186,7 @@ def write_harvest_status(
         "previous_failed": previous_failed,
         "error": error,
     }
-    path = harvest_status_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(status, indent=2))
+    write_text_atomic(harvest_status_path(config), json.dumps(status, indent=2))
 
 
 def read_harvest_status(config: Config) -> Optional[dict]:
@@ -141,9 +249,12 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
     podcast_dir = build_podcast_dir(config, slug)
     podcast_dir.mkdir(parents=True, exist_ok=True)
 
+    # left over from before staging existed, or from a publish that was interrupted
     for f in podcast_dir.glob("*_interim*"):
         log(f"[INFO] Removing stale interim file: {f.name}")
         f.unlink()
+    for f in remove_stale(podcast_dir, "*.part"):
+        log(f"[INFO] Removed stale partial file: {f.name}")
 
     # harvest each missing episode
     download_urls = await client.get_episode_download_url_bulk(to_harvest)
@@ -161,25 +272,30 @@ async def harvest_podcast(client: PodMeClient, config: Config, slug: str):
     sem = asyncio.Semaphore(config.api.max_concurrent_downloads)
 
     async def download_one(url, path):
+        # download to local staging, then publish to the share in one short, atomic copy
+        staged = staging_path_for(path)
+        staged.unlink(missing_ok=True)
         async with sem:
             try:
                 url = await resolve_redirects(client, url)
                 if is_hls_url(url):
-                    await download_hls_audio(client, url, path)
+                    await download_hls_audio(client, url, staged)
                 else:
                     await client.download_file(
-                        url, path, on_progress=log_progress, on_finished=log_finished
+                        url, staged, on_progress=log_progress, on_finished=log_finished
                     )
-                    if is_hls_playlist_file(path):
+                    if is_hls_playlist_file(staged):
                         # Served as a playlist without .m3u8 in the URL
-                        path.unlink()
-                        await download_hls_audio(client, url, path)
+                        staged.unlink()
+                        await download_hls_audio(client, url, staged)
+                await asyncio.to_thread(publish_file, staged, path)
             except Exception as e:
                 log(f"[WARN] Download failed for {path.name}: {e}")
+                staged.unlink(missing_ok=True)
                 if path.exists():
                     path.unlink()
                 if placeholder.exists():
-                    shutil.copy2(placeholder, path)
+                    await asyncio.to_thread(publish_file, placeholder, path, False)
                     path.with_suffix(".unavailable").touch()
                     log(f"[INFO] Placed unavailable-episode placeholder at {path.name}")
 
@@ -544,10 +660,9 @@ async def sync_slug_feed(
                 unavailable_ids=unavailable_ids,
                 secret=user.secret,
             )
-            with build_podcast_feed_path(config, slug, alias=user.alias).open(
-                "w", encoding="utf-8"
-            ) as feed_file:
-                feed_file.write(feed)
+            write_text_atomic(
+                build_podcast_feed_path(config, slug, alias=user.alias), feed
+            )
         log(
             f"[INFO] '{slug}' feed written for {len(config.users)} user{'s' if len(config.users) != 1 else ''}"
             f" ({len(episodes)} episode{'s' if len(episodes) != 1 else ''})"
@@ -562,10 +677,7 @@ async def sync_slug_feed(
             podcast_info.image_url,
             unavailable_ids=unavailable_ids,
         )
-        with build_podcast_feed_path(config, slug).open(
-            "w", encoding="utf-8"
-        ) as feed_file:
-            feed_file.write(feed)
+        write_text_atomic(build_podcast_feed_path(config, slug), feed)
         log(
             f"[INFO] '{slug}' feed now serving {len(episodes)} episode{'s' if len(episodes) != 1 else ''}"
         )
