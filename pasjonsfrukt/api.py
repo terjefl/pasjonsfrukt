@@ -1,5 +1,9 @@
+import asyncio
 import hmac
 import html
+import logging
+import os
+import time
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 from functools import lru_cache
@@ -8,9 +12,13 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 
-from .config import Config, User
+from . import __version__
+from .config import Config, User, config_from_stream
+from .logging_utils import LogRedactSecretFilter
 from .main import (
+    as_int,
     build_podcast_feed_path,
     build_podcast_episode_file_path,
     get_secret_query_parameter,
@@ -27,9 +35,53 @@ class RSSResponse(FileResponse):
     charset = "utf-8"
 
 
+CONFIG_ENV = "PASJONSFRUKT_CONFIG_FILE"
+STATUS_TTL_S = 60  # /status result is reused this long, so N podcasts x stat() on the share is not repeated per probe
+STATUS_TIMEOUT_S = (
+    10  # /status answers 503 after this long instead of waiting on a hanging share
+)
+
+_started = time.monotonic()
+_clock = time.monotonic  # replaced in tests
+_status_cache: Optional[tuple[float, int, dict]] = None
+_status_pending: Optional[asyncio.Future] = None
+
+
 @lru_cache()
 def api_config() -> Optional[Config]:
-    return None
+    """
+    The configuration for this process.
+
+    `pasjonsfrukt serve` overrides this dependency with the config it parsed. Workers
+    that uvicorn starts itself (--workers N) are new processes without that override,
+    so they read the file named in PASJONSFRUKT_CONFIG_FILE, which `serve` sets.
+    """
+    path = os.environ.get(CONFIG_ENV)
+    if not path or not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return config_from_stream(f)
+
+
+def install_secret_filter(config: Optional[Config]):
+    """Redact feed secrets from uvicorn's logs (query strings carry ?secret=). Idempotent."""
+    if config is None:
+        return
+    secrets = ([config.secret] if config.secret else []) + [
+        u.secret for u in config.users
+    ]
+    if not secrets:
+        return
+    for name in ("uvicorn.access", "uvicorn.error"):
+        logger = logging.getLogger(name)
+        if not any(isinstance(f, LogRedactSecretFilter) for f in logger.filters):
+            logger.addFilter(LogRedactSecretFilter(secrets))
+
+
+@api.on_event("startup")
+async def _startup():
+    # runs in every worker process, also those started with --workers N
+    install_secret_filter(api.dependency_overrides.get(api_config, api_config)())
 
 
 def raise_for_secret(config: Config, secret: Optional[str]) -> Optional[User]:
@@ -63,10 +115,16 @@ def raise_for_podcast_slug(config: Config, slug):
         raise HTTPException(status_code=404, detail="Requested resource not found")
 
 
-def file_response_if_exists(file_path, response_class=FileResponse):
-    if not file_path.exists() or not file_path.is_file():
+def _existing_file(file_path) -> Optional[str]:
+    return str(file_path.resolve()) if file_path.is_file() else None
+
+
+async def file_response_if_exists(file_path, response_class=FileResponse):
+    # the lookup touches the share (CIFS), so it runs in a thread and never blocks the event loop
+    resolved = await run_in_threadpool(_existing_file, file_path)
+    if resolved is None:
         raise HTTPException(status_code=404, detail="Requested resource not found")
-    return response_class(str(file_path.resolve()))
+    return response_class(resolved)
 
 
 def get_feed_meta(feed_path):
@@ -113,11 +171,20 @@ async def get_index(secret: Optional[str] = None, config: Config = Depends(api_c
         f"?secret={user.secret}" if user else get_secret_query_parameter(config)
     )
 
-    podcasts = []
-    for slug in config.podcasts:
-        feed_path = build_podcast_feed_path(config, slug, alias=alias)
-        title, description = get_feed_meta(feed_path)
-        podcasts.append((title or slug, slug, description or ""))
+    slugs = list(config.podcasts)
+    # parsing the feeds reads from the share; do it in threads, not in the event loop
+    metas = await asyncio.gather(
+        *(
+            run_in_threadpool(
+                get_feed_meta, build_podcast_feed_path(config, slug, alias=alias)
+            )
+            for slug in slugs
+        )
+    )
+    podcasts = [
+        (title or slug, slug, description or "")
+        for slug, (title, description) in zip(slugs, metas)
+    ]
 
     podcasts.sort(key=lambda x: x[0].lower())
 
@@ -186,18 +253,32 @@ function toggleDesc(uid) {{
 
 
 @api.get("/health")
-async def get_health(config: Config = Depends(api_config)):
+async def get_health():
     """
-    Unauthenticated health check for monitoring (e.g. Uptime Kuma).
+    Liveness: the process is up and answering. Unauthenticated, for the Docker
+    healthcheck and monitoring (InfraDash, Uptime Kuma).
 
-    Returns 200 when the server is up, every configured podcast has a feed file
-    and the last full harvest finished recently without failures; otherwise 503
-    with the reason in the body. Never includes secrets or episode data.
+    Does no file I/O and has no dependencies, so it answers 200 even when the share
+    with yield_dir hangs or is missing. The deep check is GET /status.
+    """
+    return {
+        "status": "ok",
+        "version": __version__,
+        "uptime_seconds": int(time.monotonic() - _started),
+    }
+
+
+def compute_status(config: Config) -> tuple[int, dict]:
+    """
+    The deep check behind GET /status: last harvest age, failed podcasts and missing
+    feed files. Reads from yield_dir (the share), so call it in a thread.
     """
     problems = []
+    warnings = []
     now = datetime.now(timezone.utc)
 
     status = read_harvest_status(config)
+    last_harvest = None
     harvest_age = None
     if status is None:
         problems.append("no harvest has completed yet")
@@ -211,10 +292,22 @@ async def get_health(config: Config = Depends(api_config)):
             problems.append("harvest status file is unreadable")
         if status.get("error"):
             problems.append(f"last harvest aborted: {status['error']}")
-        if status.get("failed"):
-            problems.append(
-                f"podcasts failed in last harvest: {', '.join(status['failed'])}"
-            )
+        failed = status.get("failed") or []
+        streak = status.get("failed_streak")
+        if isinstance(streak, dict):
+            # A podcast that failed only in the last run is most likely a transient
+            # network error: report it as a warning. Two runs in a row is a real fault.
+            persistent = [s for s in failed if as_int(streak.get(s), default=2) >= 2]
+            warnings = [
+                f"podcast failed in last harvest only: {s}"
+                for s in failed
+                if s not in persistent
+            ]
+        else:
+            # Status file written before streaks were recorded: keep the old behaviour.
+            persistent = failed
+        if persistent:
+            problems.append(f"podcasts failed in last harvest: {', '.join(persistent)}")
 
     aliases = [u.alias for u in config.users] or [None]
     missing_feeds = [
@@ -236,8 +329,55 @@ async def get_health(config: Config = Depends(api_config)):
         "last_harvest_duration_seconds": (
             status.get("duration_seconds") if status else None
         ),
+        "warnings": warnings,
     }
-    return JSONResponse(body, status_code=200 if not problems else 503)
+    return (200 if not problems else 503), body
+
+
+async def _refresh_status(config: Config) -> tuple[int, dict]:
+    global _status_cache
+    code, body = await run_in_threadpool(compute_status, config)
+    _status_cache = (_clock(), code, body)
+    return code, body
+
+
+async def cached_status(config: Config) -> tuple[int, dict]:
+    """
+    compute_status at most once per STATUS_TTL_S. While a lookup is running, other
+    callers wait for the same one instead of starting their own (a hanging share would
+    otherwise pile up threads). After STATUS_TIMEOUT_S the caller gets 503; the lookup
+    keeps running and its result is cached when it finishes.
+    """
+    global _status_pending
+    if _status_cache is not None and _clock() - _status_cache[0] < STATUS_TTL_S:
+        return _status_cache[1], _status_cache[2]
+    if _status_pending is None or _status_pending.done():
+        _status_pending = asyncio.ensure_future(_refresh_status(config))
+    try:
+        return await asyncio.wait_for(asyncio.shield(_status_pending), STATUS_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return 503, {
+            "status": "error",
+            "problems": [
+                f"status check did not finish within {STATUS_TIMEOUT_S}s (is the storage slow?)"
+            ],
+            "podcasts": len(config.podcasts),
+            "warnings": [],
+        }
+
+
+@api.get("/status")
+async def get_status(config: Config = Depends(api_config)):
+    """
+    Deep health check, unauthenticated: 200 when every configured podcast has a feed
+    file and the last full harvest finished recently without persistent failures;
+    otherwise 503 with the reasons in "problems". A podcast that failed only in the
+    last full harvest is listed under "warnings" and does not cause a 503; one that
+    failed in two full harvests in a row does. The result is cached for STATUS_TTL_S
+    seconds. Never includes secrets or episode data, and makes no external calls.
+    """
+    code, body = await cached_status(config)
+    return JSONResponse(body, status_code=code)
 
 
 @api.get(f"/{{slug}}")
@@ -247,7 +387,7 @@ async def get_feed(
     user = raise_for_secret(config, secret)
     raise_for_podcast_slug(config, slug)
     alias = user.alias if user else None
-    return file_response_if_exists(
+    return await file_response_if_exists(
         build_podcast_feed_path(config, slug, alias=alias), RSSResponse
     )
 
@@ -261,6 +401,6 @@ async def get_episode(
 ):
     raise_for_secret(config, secret)
     raise_for_podcast_slug(config, podcast_slug)
-    return file_response_if_exists(
+    return await file_response_if_exists(
         build_podcast_episode_file_path(config, podcast_slug, episode_id)
     )

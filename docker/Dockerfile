@@ -10,6 +10,12 @@ RUN touch /var/log/pasjonsfrukt.log
 
 WORKDIR /app
 
+# web (default) runs only the server, harvest only cron; see docker/entrypoint.sh
+ENV PASJONSFRUKT_MODE=web
+# Local staging for downloads before they are copied to yield_dir (bind-mount local disk here)
+ENV STAGING_DIR=/app/staging
+RUN mkdir -p /app/staging
+
 RUN curl -sSL https://install.python-poetry.org | python3 - -y --version 1.8.3
 
 RUN /root/.local/bin/poetry config virtualenvs.create false

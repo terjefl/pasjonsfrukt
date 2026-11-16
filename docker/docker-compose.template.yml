@@ -4,6 +4,8 @@ services:
     image: ghcr.io/terjefl/pasjonsfrukt:latest
     restart: unless-stopped
     #command: --host 0.0.0.0 --port 8000  # customize flags for 'api' startup command
+    environment:
+      - PASJONSFRUKT_MODE=web
     ports:
       - "8000:8000"
     volumes:
@@ -11,5 +13,17 @@ services:
       - ./yield:/app/yield
       # config
       - ./config.yaml:/app/config.yaml:ro
+
+  pasjonsfrukt-harvest:
+    container_name: pasjonsfrukt-harvest
+    image: ghcr.io/terjefl/pasjonsfrukt:latest
+    restart: unless-stopped
+    environment:
+      - PASJONSFRUKT_MODE=harvest
+    volumes:
+      - ./yield:/app/yield
+      - ./config.yaml:/app/config.yaml:ro
       # crontab
       - ./crontab:/etc/cron.d/pasjonsfrukt-crontab:ro
+      # local disk for downloads before they are copied to yield
+      - ./staging:/app/staging
